@@ -1,0 +1,20 @@
+# PII pipeline state: key, vault, run log
+.vagrant_state/
+.state/
+*.bin
+vault.json
+runs.jsonl
+
+# Secrets
+.env
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

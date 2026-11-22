@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>desensitizer-core-vagrant</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot"></span>
+    <strong>desensitizer-core-vagrant</strong>
+    <span class="sub">censor &rarr; cloud &rarr; restore &middot; no agent, no local model</span>
+  </div>
+  <div class="status">
+    <span id="badge-model" class="badge">connecting…</span>
+    <span id="badge-live" class="badge">—</span>
+  </div>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="panel-head">
+      <h2>1 &middot; input (stays here)</h2>
+      <div class="actions">
+        <button id="btn-example" class="ghost" type="button">example</button>
+        <button id="btn-clear" class="ghost" type="button">clear</button>
+      </div>
+    </div>
+    <textarea id="input" spellcheck="false" placeholder="Paste a document containing personal data…"></textarea>
+    <div class="actions">
+      <button id="btn-censor" type="button">Censor only</button>
+      <button id="btn-demo" type="button">Run &middot; offline demo</button>
+      <button id="btn-live" type="button" class="primary">Run &middot; live cloud</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>2 &middot; what leaves the host</h2>
+      <span id="chips" class="chips"></span>
+    </div>
+    <pre id="censored" class="out">—</pre>
+    <div class="actions">
+      <button id="btn-restore" class="ghost" type="button">Restore this panel</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>3 &middot; reply &amp; restore</h2>
+      <span id="runmeta" class="meta"></span>
+    </div>
+    <pre id="raw" class="out">—</pre>
+    <h3>restored locally</h3>
+    <pre id="restored" class="out">—</pre>
+  </section>
+</main>
+
+<footer>
+  <span id="status" class="statusline">ready</span>
+  <span class="note">tokens are <code>kind:BASE32</code> &middot; the key never leaves this process</span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

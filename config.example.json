@@ -1,0 +1,12 @@
+{
+  "cloud": {
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "api_key_env": "VAGRANT_API_KEY",
+    "timeout": 120,
+    "max_tokens": 1024
+  },
+  "names": [
+    "Alice Smith"
+  ]
+}
