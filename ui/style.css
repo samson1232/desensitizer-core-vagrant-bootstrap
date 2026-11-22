@@ -171,3 +171,23 @@ footer {
 .statusline.warn { color: var(--warn); }
 .statusline.bad { color: var(--bad); }
 .note code { color: #a5d6ff; }
+
+/* corpus panel */
+.panel.wide { grid-column: 1 / -1; min-height: 0; }
+.docs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow: auto; }
+.docs li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg);
+  font-size: 13px;
+}
+.docs li.empty { display: block; color: var(--dim); border-style: dashed; }
+.docs code { color: #a5d6ff; font-family: var(--mono); font-size: 12px; }
+.docs .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.docs .kinds { color: var(--dim); font: 11px var(--mono); }
+.meta { color: var(--dim); font: 11px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch; }

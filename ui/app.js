@@ -131,3 +131,102 @@ $("btn-live").onclick = () => run("live");
 $("btn-restore").onclick = restorePanel;
 
 health();
+
+// ---------------------------------------------------------------- corpus panel
+let WORKSPACE = null;
+
+function renderDocs(ws) {
+  const list = $("docs");
+  list.innerHTML = "";
+  if (!ws || !ws.enabled) {
+    list.innerHTML = '<li class="empty">no workspace configured — start ui_server.py with --workspace-root and --project</li>';
+    return;
+  }
+  if (!ws.documents.length) {
+    list.innerHTML = '<li class="empty">no documents yet — upload a pdf, docx or xlsx</li>';
+    return;
+  }
+  ws.documents.forEach((d) => {
+    const li = document.createElement("li");
+    const kinds = Object.entries(d.kinds || {}).map(([k, n]) => `${k}×${n}`).join(", ") || "no placeholders";
+    li.innerHTML = `<code>${escapeHtml(d.id)}</code> <span class="name">${escapeHtml(d.source_name)}</span>` +
+                   `<span class="kinds">${escapeHtml(kinds)}</span>`;
+    li.title = d.aliased_path;
+    list.appendChild(li);
+  });
+}
+
+async function loadWorkspace() {
+  try {
+    const ws = await api("/api/workspace");
+    WORKSPACE = ws;
+    const badge = $("badge-ws");
+    badge.textContent = ws.enabled ? `corpus: ${ws.project}` : "corpus: off";
+    badge.className = "badge " + (ws.enabled ? "good" : "warn");
+    if (ws.enabled) {
+      $("ws-path").textContent = ws.work_dir;
+      $("btn-upload").disabled = false;
+      $("btn-index").disabled = false;
+      $("btn-copy").disabled = false;
+    } else {
+      $("ws-path").textContent = "";
+      ["btn-upload", "btn-index", "btn-copy"].forEach((id) => { $(id).disabled = true; });
+    }
+    renderDocs(ws);
+  } catch (err) {
+    setStatus(`workspace unavailable: ${err.message}`, "bad");
+  }
+}
+
+function readAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(new Error(`cannot read ${file.name}`));
+    r.onload = () => resolve(String(r.result).split(",")[1] || "");
+    r.readAsDataURL(file);
+  });
+}
+
+async function uploadFiles(files) {
+  if (!files || !files.length) return;
+  setStatus(`aliasing ${files.length} document(s)…`);
+  let added = 0, failed = 0;
+  for (const file of files) {
+    try {
+      const data = await readAsBase64(file);
+      const res = await api("/api/upload", { name: file.name, data });
+      added += 1;
+      const d = res.document;
+      const kinds = Object.entries(d.kinds || {}).map(([k, n]) => `${k}×${n}`).join(", ") || "no placeholders";
+      setStatus(`${d.id} ← ${file.name}: ${kinds}`, "ok");
+      renderDocs(res.workspace);
+    } catch (err) {
+      failed += 1;
+      setStatus(`${file.name}: ${err.message}`, "bad");
+    }
+  }
+  if (added) setStatus(`aliased ${added} document(s)${failed ? `, ${failed} failed` : ""} — the agent can now work in work/`, "ok");
+}
+
+$("btn-upload").onclick = () => $("file").click();
+$("file").onchange = async (event) => {
+  await uploadFiles(Array.from(event.target.files || []));
+  event.target.value = "";
+};
+$("btn-index").onclick = async () => {
+  try {
+    const r = await api("/api/index");
+    const view = $("index-view");
+    view.hidden = !view.hidden;
+    if (!view.hidden) view.textContent = r.index;
+  } catch (err) { setStatus(`index: ${err.message}`, "bad"); }
+};
+$("btn-copy").onclick = async () => {
+  if (!WORKSPACE || !WORKSPACE.work_dir) return;
+  try {
+    await navigator.clipboard.writeText(WORKSPACE.work_dir);
+    setStatus(`copied ${WORKSPACE.work_dir}`, "ok");
+  } catch { setStatus(WORKSPACE.work_dir); }
+};
+
+loadWorkspace();

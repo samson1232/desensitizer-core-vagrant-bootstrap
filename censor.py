@@ -59,6 +59,9 @@ PATTERNS = [
     ("iban", re.compile(r"\bGB\d{2}[A-Z]{4}\d{14}\b")),
     ("dob", re.compile(r"\b(?:19[3-9]\d|200\d)-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b")),
     ("hostname", re.compile(r"\b(?:ops|eng|hr|it)-ws-\d{3}\b")),
+    # Windows/Dell-style device names, labelled or bare: DESKTOP-9941A, LAPTOP-7C2K9Q.
+    # Restricted to the known prefixes so ordinary CAPS-WORDS do not get caught.
+    ("device", re.compile(r"\b(?:DESKTOP|LAPTOP|WORKSTATION|SERVER|WS)-[A-Z0-9]{4,12}\b")),
     ("utr", re.compile(r"\b\d{10}\b")),
 ]
 
@@ -76,8 +79,32 @@ CANARIES = {
     "iban": "GB33BUKB20201555555555",
     "dob": "1984-07-19",
     "hostname": "ops-ws-014",
+    "device": "DESKTOP-9941A",
     "utr": "1234567890",
 }
+
+# Extraction is lossy. pdftotext and OCR insert spaces inside values, swap O/0 and l/1,
+# split a value across a line break, and clip the tail of a line at the page edge. These
+# patterns catch the *shape* of that damage for the kinds where a near-miss is still a
+# disclosure. A loose match is tokenised like any other, so restore stays byte-exact --
+# it restores the damaged text, which is what the file actually contains.
+LOOSE_PATTERNS = [
+    ("email", re.compile(r"[A-Za-z0-9._%+\-]{1,64}\s?@\s?[A-Za-z0-9.\-]{1,64}\s?\.\s?[A-Za-z]{2,6}")),
+    ("mac", re.compile(r"(?<![A-Za-z0-9])(?:[0-9A-Fa-f]{2}[:-][ \t]?){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])")),
+    ("device", re.compile(r"\b(?:DESKTOP|LAPTOP|WORKSTATION|SERVER|WS)[\s\-\u2013\u2014]{0,3}[A-Z0-9]{3,12}\b")),
+    ("phone", re.compile(r"(?<![\w+])\+\d{1,3}[ \-.]?\(?\d{1,4}\)?[ \-.]?\d{3,4}[ \-.]?\d{3,4}(?!\w)")),
+    ("ipv4", re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)[. ]){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b")),
+]
+
+# Damage that cannot be tokenised because the value itself is incomplete. These are not
+# secrets you can restore -- they are evidence the extractor ate something, so the
+# document is flagged `needs_review` instead of being shipped quietly.
+FRAGMENT_PATTERNS = [
+    ("mac", re.compile(r"\b(?:[0-9A-Fa-f]{2}:){4,5}[0-9A-Fa-f]{1,2}\b(?!:)")),
+    ("ipv4", re.compile(r"\b(?:\d{1,3}\.){2,3}$")),
+    ("email", re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+$")),
+    ("device", re.compile(r"\b(?:DESKTOP|LAPTOP|WORKSTATION|SERVER|WS)-[A-Z0-9]{1,2}\b")),
+]
 
 
 def _mac(key, kind, value):
@@ -95,26 +122,65 @@ def _mask_tokens(text):
     return TOKEN_RE.sub(lambda m: "\x00" * len(m.group(0)), text)
 
 
-def detect(text, extra=()):
-    """Return [(start, end, kind, value)] for the original text, non-overlapping.
-
-    ``extra`` is additional (kind, compiled) pairs — the roster-based name pattern,
-    which only exists when a roster is supplied. Overlaps resolve by earliest start,
-    then longest match, then pattern order (roster first, so a known name wins over
-    a shorter generic rule that starts at the same place).
-    """
+def _collect(text, extra=()):
+    """All candidate spans, tagged with how they were found. Overlaps resolved once."""
     masked = _mask_tokens(text)
+    families = [(0, "strict", tuple(extra) + tuple(PATTERNS)),
+                (1, "loose", tuple(LOOSE_PATTERNS))]
     found = []
-    for order, (kind, rx) in enumerate(tuple(extra) + tuple(PATTERNS)):
-        for m in rx.finditer(masked):
-            found.append((m.start(), m.end(), order, kind, text[m.start():m.end()]))
-    found.sort(key=lambda c: (c[0], -(c[1] - c[0]), c[2]))
+    for base, method, patterns in families:
+        for order, (kind, rx) in enumerate(patterns):
+            for m in rx.finditer(masked):
+                if m.end() > m.start():
+                    found.append({"start": m.start(), "end": m.end(), "kind": kind,
+                                  "value": text[m.start():m.end()], "method": method,
+                                  "rank": base * 100 + order, "restorable": True})
+    found.sort(key=lambda s: (s["start"], -(s["end"] - s["start"]), s["rank"]))
     picked, last_end = [], -1
-    for start, end, _order, kind, value in found:
-        if start >= last_end:
-            picked.append((start, end, kind, value))
-            last_end = end
+    for span in found:
+        if span["start"] >= last_end:
+            picked.append(span)
+            last_end = span["end"]
+
+    # Fragments: damage with no complete value to tokenise. Only look where nothing was
+    # already claimed, so a matched MAC is not also reported as a fragment of itself.
+    claimed = [(s["start"], s["end"]) for s in picked]
+    for kind, rx in FRAGMENT_PATTERNS:
+        for m in rx.finditer(masked):
+            if m.end() <= m.start():
+                continue
+            if any(m.start() < end and m.end() > start for start, end in claimed):
+                continue
+            picked.append({"start": m.start(), "end": m.end(), "kind": kind,
+                           "value": text[m.start():m.end()], "method": "fragment",
+                           "rank": 900, "restorable": False})
+    picked.sort(key=lambda s: s["start"])
     return picked
+
+
+def detect(text, extra=()):
+    """Return [(start, end, kind, value)] for restorable spans, non-overlapping.
+
+    Overlaps resolve by earliest start, then longest match, then pattern family
+    (strict, then loose, then roster).
+    """
+    return [(s["start"], s["end"], s["kind"], s["value"])
+            for s in _collect(text, extra) if s["restorable"]]
+
+
+def detect_spans(text, extra=()):
+    """The same scan, with the bookkeeping the database stores: method and restorability.
+
+    Everything the schema needs to represent damaged text honestly: strict matches,
+    loose matches (spaces or swapped separators inside a value), and fragments (a value
+    the extractor clipped, which cannot be restored and must be reviewed).
+    """
+    return _collect(text, extra)
+
+
+def fragments(text, extra=()):
+    """Only the non-restorable hits: evidence that extraction damaged a value."""
+    return [s for s in _collect(text, extra) if not s["restorable"]]
 
 
 def compile_roster(names):
@@ -176,6 +242,8 @@ class Censor:
         self.names = [n for n in (names or []) if n]
         self.roster = compile_roster(self.names)
         self.tokens = {}
+        self.last_spans = []
+        self.last_fragments = []
         self._load_vault()
 
     # -- vault ------------------------------------------------------------
@@ -203,27 +271,44 @@ class Censor:
     # -- censor -----------------------------------------------------------
     def censor(self, text):
         """Return (censored_text, {kind: count}). Idempotent for already-tokenised text."""
-        spans = detect(text, self.roster)
+        spans = detect_spans(text, self.roster)
+        self.last_spans = spans
+        self.last_fragments = [s for s in spans if not s["restorable"]]
         out, cursor, counts = [], 0, {}
-        for start, end, kind, value in spans:
+        for span in spans:
+            if not span["restorable"]:
+                continue
+            kind, value = span["kind"], span["value"]
             token = f"{kind}:{make_token(self.key, kind, value)}"
             known = self.tokens.get(token)
             if known and known["value"] != value:
                 raise CensorFailure(f"token collision on {token}: {known['value']!r} vs {value!r}")
             self.tokens.setdefault(token, {"kind": kind, "value": value})
-            out.append(text[cursor:start])
+            out.append(text[cursor:span["start"]])
             out.append(token)
-            cursor = end
+            cursor = span["end"]
             counts[kind] = counts.get(kind, 0) + 1
         out.append(text[cursor:])
         return "".join(out), counts
 
-    def censor_verified(self, text):
-        """Censor, then prove the result contains no detectable value. Fail closed."""
+    def censor_verified(self, text, allow_fragments=False):
+        """Censor, then prove the result contains no detectable value. Fail closed.
+
+        Fragments are evidence that extraction damaged a value (a MAC clipped at the page
+        edge, an address missing its domain). They cannot be tokenised because there is
+        no complete value, so the default is to refuse the document rather than ship a
+        partial identifier. ``allow_fragments=True`` ships it marked needs_review.
+        """
         censored, counts = self.censor(text)
         leaks = detect(censored, self.roster)
         if leaks:
             raise CensorFailure("censored text still matches detectors: " + ", ".join(sorted({k for _, _, k, _ in leaks})))
+        if self.last_fragments and not allow_fragments:
+            detail = ", ".join(f"{s['kind']}@{s['start']}({len(s['value'])}ch)" for s in self.last_fragments[:5])
+            raise CensorFailure(
+                f"extraction damage in {len(self.last_fragments)} place(s): {detail} — "
+                "a value looks clipped or malformed; re-extract the source, or alias it with "
+                "allow_fragments=True to ship it flagged needs_review")
         return censored, counts
 
     # -- restore ----------------------------------------------------------

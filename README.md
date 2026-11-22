@@ -1,7 +1,16 @@
-# desensitizer-core-vagrant
+# desensitizer-core-vagrant-bootstrap
 
-A small, self-contained PII pipeline for text you are about to send to a **cloud** model:
-censor locally, let the model work on opaque tokens, restore locally.
+Censor locally, send only opaque tokens to a cloud model, restore locally — and hand the
+aliased documents to a Hermes agent that is confined to them.
+
+The pipeline (censor → one cloud call → restore) is unchanged from
+`desensitizer-core-vagrant`. This distribution adds the part that makes it usable on real
+work: **document ingestion** (pdf/docx/xlsx), a **corpus** the agent may touch, an
+**alias → value workflow** that turns a result back into a readable file, a **Flask +
+SQLite integration layer** between the two, and a **bootstrap** that builds the two Hermes
+profiles from a fresh install.
+
+Start at [`INSTALL.md`](INSTALL.md) if you want the whole path in order.
 
 No local model. No rating, no routing, no lanes. No agents, no tool loops. Standard
 library only — `git clone` is the install.
@@ -174,6 +183,114 @@ per-suite floor, so a suite that stops asserting is a red run rather than a quie
 vagrant up      # ubuntu/noble, installs python3, runs verify.py in provisioning
 vagrant ssh
 ```
+
+## Documents, corpus, two agents
+
+```sh
+python3 bootstrap.py --project acme --root ~/desensitizer --names "Alice Smith"
+```
+
+```
+~/desensitizer/acme/
+    work/        <- the agent's entire world: aliased text only, plus INDEX.md
+    private/     <- originals as uploaded (0700), outside the agent's directory
+    state/       <- key.bin, vault.json, manifest.json, corpus.db (0700)
+    restored/    <- alias -> value output (0700, files 0600)
+```
+
+Two profiles are created, cloned from your active Hermes profile so the model and
+credentials already work:
+
+| profile | cwd | job |
+|---|---|---|
+| `desens-acme` | `acme/work` | reads the aliased documents, writes results back there |
+| `desens-acme-curator` | `acme/` | owns ingest, index and restore; does not do the analysis |
+
+Both get a generated `SOUL.md` and a reduced toolset (no web, browser, image or audio).
+The worker's SOUL states the directory is its whole world and that it must not try to
+recover the values. See [`INSTALL.md` § 7](INSTALL.md) for what that confinement is worth,
+and where it stops (it is not an OS sandbox).
+
+Uploaded documents are extracted and aliased **before** any agent sees them:
+
+```sh
+python3 ingest_cli.py --project acme --root ~/desensitizer add ticket.pdf notes.docx
+python3 ingest_cli.py --project acme --root ~/desensitizer status
+```
+
+`.docx` and `.xlsx` are read with `zipfile` + XML (no python-docx, no openpyxl); `.pdf` uses
+`pdftotext` or PyMuPDF and **refuses** a scanned document rather than shipping an empty page.
+
+## Alias → value: getting the real file back
+
+The workflow, end to end:
+
+```
+upload ─► extract ─► alias (kind:TOKEN) ─► work/doc-001.md ─► agent edits/creates
+                                                                    │
+        restored/doc-001--ticket.restored.docx  ◄── restore ◄───────┘
+```
+
+```sh
+# one document, back to a real .docx
+python3 ingest_cli.py --project acme --root ~/desensitizer restore-doc --doc doc-001 --fmt docx
+
+# everything in work/, including files the agent wrote
+python3 ingest_cli.py --project acme --root ~/desensitizer restore-all --fmt md
+
+# a snippet, to stdout
+python3 ingest_cli.py --project acme --root ~/desensitizer restore --in reply.txt
+```
+
+Rules, all tested:
+
+- every `kind:TOKEN` must resolve or the restore is refused and **nothing is written**;
+- no token may survive into the output;
+- output lands in `restored/` at `0600`, inside a `0700` directory;
+- formats are `md`, `txt`, `docx`, `xlsx`; **PDF output is refused** — a flattened document
+  cannot be un-flattened, and a fake PDF would be worse than a `.md`;
+- the restore log records paths, counts and hashes, never a value.
+
+## Integration layer: Flask + SQLite between the two
+
+```sh
+uv venv && uv pip install -r requirements.txt
+.venv/bin/python app.py --project acme --root ~/desensitizer            # demo mode
+.venv/bin/python app.py --project acme --root ~/desensitizer --live \
+    --base-url https://api.deepseek.com --model deepseek-chat --api-key-env DEEPSEEK_API_KEY
+```
+
+`state/corpus.db` is the contract between the layers — the aliasing side writes a document
+row, the agent side is handed a job row, and a restore writes a restore row:
+
+| table | holds |
+|---|---|
+| `documents` | id, source name, format, extractor, aliased/private paths, kinds, chars, raw_chars, sha256, **status** (`aliased` \| `needs_review`), span/fragment counts |
+| `document_spans` | one row per value found: kind, **method** (`strict` \| `loose` \| `fragment`), start, end, chars, restorable — never the value |
+| `document_fragments` | damage the extractor caused (a clipped MAC, an address with no TLD), kept apart because it is why a document is `needs_review` |
+| `jobs` | prompt, agent profile, doc ids, work dir, status, exit code, output |
+| `restores` | source, restored path, token count, format, sha256 |
+| `events` | audit trail of the above |
+
+Extraction is lossy, so the schema has a level for each kind of damage rather than one
+"aliased" flag:
+
+- **strict** — a clean match; tokenised and restorable.
+- **loose** — the value is intact but has a space or a swapped separator inside it
+  (`priya.nair @ example.com`, `00:1A:2B: 3C:4D:5E`). Tokenised as found, so restore
+  returns the damaged text byte-exact — which is what the file actually contains.
+- **fragment** — the extractor clipped the value (`00:1A:2B:3C:4D:5`). There is nothing to
+  tokenise, so the document is **refused by default**; `--allow-fragments` ships it marked
+  `needs_review`, with a `REVIEW:` banner in `work/` naming the kinds, and the fragment rows
+  in the database for the curator to resolve.
+
+**No plaintext PII in the database.** It stores ids, paths, kinds, counts and hashes; the
+values stay in `state/vault.json`. `tests/test_app.py` asserts this against the on-disk
+bytes including the WAL, not against the schema.
+
+Routes: `/api/upload`, `/api/documents`, `/api/documents/<id>/restore`, `/api/download/<name>`,
+`/api/jobs` (+ `/run`), every `/api/health`, `/api/index`, `/api/censor`, `/api/decensor`,
+`/api/run` the stdlib server also serves — one frontend drives both backends.
 
 ## Deliberately missing
 

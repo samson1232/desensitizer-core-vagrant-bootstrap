@@ -76,7 +76,8 @@ def load_env_file(path):
 
 
 class App:
-    def __init__(self, state_dir=STATE_DIR, transport=None, client=None, model_label=None, names=None):
+    def __init__(self, state_dir=STATE_DIR, transport=None, client=None, model_label=None, names=None,
+                 workspace_root=None, project=None):
         self.state_dir = state_dir
         os.makedirs(state_dir, exist_ok=True)
         self.censors = censor.Censor(os.path.join(state_dir, "key.bin"),
@@ -85,6 +86,11 @@ class App:
         self.live_client = client
         self.log_path = os.path.join(state_dir, "runs.jsonl")
         self.model_label = model_label or ("live" if client else "demo-echo")
+        self.names = names or []
+        self.ws = None
+        if workspace_root and project:
+            import workspace as _ws
+            self.ws = _ws.Workspace(workspace_root, project, names=self.names, create=True)
 
     # -- operations -------------------------------------------------------
     def do_censor(self, text):
@@ -99,6 +105,35 @@ class App:
             return {"restored": self.censors.restore(text)}
         except censor.CensorFailure as exc:
             return {"error": str(exc)}
+
+    def do_upload(self, name, data_b64):
+        """Decode one uploaded document, alias it into the corpus, return the manifest entry."""
+        if self.ws is None:
+            return {"error": "no workspace configured; start with --workspace-root and --project"}
+        import base64
+        import tempfile
+        import ingest as _ingest
+        try:
+            raw = base64.b64decode(data_b64, validate=True)
+        except Exception:
+            return {"error": "upload was not valid base64"}
+        suffix = os.path.splitext(name or "")[1].lower()
+        if not _ingest.supported("x" + suffix):
+            return {"error": f"unsupported format {suffix or '(none)'}"}
+        fd, tmp = tempfile.mkstemp(suffix=suffix, prefix="upload-")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+            entry = self.ws.add(tmp)
+            # keep the uploaded name, not the temp name, in the corpus
+            entry["source_name"] = os.path.basename(name or "document" + suffix)
+            self.ws._save_manifest()
+            self.ws.write_index()
+        except Exception as exc:
+            return {"error": str(exc)}
+        finally:
+            os.unlink(tmp)
+        return {"document": entry, "workspace": self.ws.status()}
 
     def do_run(self, text, mode):
         client = self.live_client if mode == "live" else _ClientWrapper(self.demo_transport)
@@ -180,7 +215,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "service": "desensitizer-core-vagrant",
                                     "live": app.live_client is not None, "model": app.model_label,
                                     "kinds": kinds, "names": len(app.censors.names),
-                                    "version": "0.1.0"})
+                                    "version": "0.2.0"})
+        if path == "/api/workspace":
+            app = self.app
+            if app.ws is None:
+                return self._json(200, {"enabled": False})
+            return self._json(200, {"enabled": True, **app.ws.status()})
+        if path == "/api/index":
+            app = self.app
+            if app.ws is None:
+                return self._json(404, {"error": "no workspace configured"})
+            try:
+                with open(app.ws.index_path, encoding="utf-8") as fh:
+                    return self._json(200, {"index": fh.read()})
+            except OSError as exc:
+                return self._json(500, {"error": str(exc)})
         if path.startswith("/api/"):
             return self._json(404, {"error": "unknown endpoint"})
         return self._static(path)
@@ -203,6 +252,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not text.strip():
                 return self._json(400, {"error": "nothing to send"})
             return self._json(200, app.do_run(text, mode))
+        if path == "/api/upload":
+            name = payload.get("name") or ""
+            data = payload.get("data") or ""
+            if not data:
+                return self._json(400, {"error": "no file data"})
+            result = app.do_upload(name, data)
+            return self._json(400 if "error" in result else 200, result)
         return self._json(404, {"error": "unknown endpoint"})
 
 
@@ -214,9 +270,9 @@ class _Server(socketserver.ThreadingTCPServer):
 
 
 def make_server(port=8799, host="127.0.0.1", state_dir=STATE_DIR, transport=None, client=None,
-                model_label=None, names=None):
+                model_label=None, names=None, workspace_root=None, project=None):
     app = App(state_dir=state_dir, transport=transport, client=client, model_label=model_label,
-              names=names)
+              names=names, workspace_root=workspace_root, project=project)
     handler = type("BoundHandler", (Handler,), {"app": app})
     httpd = _Server((host, port), handler)
     return httpd
@@ -247,6 +303,10 @@ def main(argv=None):
     ap.add_argument("--names", default=os.environ.get("VAGRANT_NAMES", ""),
                     help="comma-separated name roster to censor as kind 'name'")
     ap.add_argument("--names-file", default=None, help="file with one name per line")
+    ap.add_argument("--workspace-root", default=os.environ.get("DESENS_ROOT"),
+                    help="root that holds the corpus (default: $DESENS_ROOT)")
+    ap.add_argument("--project", default=os.environ.get("DESENS_PROJECT"),
+                    help="project name inside the workspace root; enables upload + corpus view")
     args = ap.parse_args(argv)
 
     if args.env_file:
@@ -267,7 +327,8 @@ def main(argv=None):
     for candidate in [args.port] + [args.port + i for i in range(1, 10)]:
         try:
             httpd = make_server(port=candidate, host=args.host, state_dir=args.state_dir,
-                                client=client, model_label=label, names=names)
+                                client=client, model_label=label, names=names,
+                                workspace_root=args.workspace_root, project=args.project)
             args.port = candidate
             break
         except OSError as exc:  # port busy or held in TIME_WAIT: try the next one
@@ -277,6 +338,8 @@ def main(argv=None):
     print(f"desensitizer-core-vagrant UI  ->  http://{args.host}:{args.port}/")
     print(f"  mode: {'live + demo' if client else 'demo only (no key, no network)'}   model: {label}"
           f"   names: {len(names)}")
+    if args.workspace_root and args.project:
+        print(f"  corpus: {os.path.join(os.path.abspath(args.workspace_root), args.project, 'work')}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

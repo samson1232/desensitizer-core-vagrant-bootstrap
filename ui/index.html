@@ -3,23 +3,40 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>desensitizer-core-vagrant</title>
+<title>desensitizer-core-vagrant-bootstrap</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header>
   <div class="brand">
     <span class="dot"></span>
-    <strong>desensitizer-core-vagrant</strong>
-    <span class="sub">censor &rarr; cloud &rarr; restore &middot; no agent, no local model</span>
+    <strong>desensitizer-core-vagrant-bootstrap</strong>
+    <span class="sub">censor &rarr; cloud &rarr; restore &middot; agentless &middot; corpus for the agent</span>
   </div>
   <div class="status">
     <span id="badge-model" class="badge">connecting…</span>
     <span id="badge-live" class="badge">—</span>
+    <span id="badge-ws" class="badge">—</span>
   </div>
 </header>
 
 <main>
+  <section class="panel wide" id="corpus">
+    <div class="panel-head">
+      <h2>corpus &middot; upload &amp; alias</h2>
+      <span id="ws-path" class="meta"></span>
+    </div>
+    <div class="actions">
+      <input id="file" type="file" multiple hidden
+             accept=".pdf,.docx,.xlsx,.xlsm,.txt,.md,.markdown,.csv,.tsv,.json,.log">
+      <button id="btn-upload" class="primary" type="button">Upload documents…</button>
+      <button id="btn-index" class="ghost" type="button">show INDEX.md</button>
+      <button id="btn-copy" class="ghost" type="button">copy work dir</button>
+    </div>
+    <ul id="docs" class="docs"><li class="empty">no documents yet — upload a pdf, docx or xlsx</li></ul>
+    <pre id="index-view" class="out" hidden></pre>
+  </section>
+
   <section class="panel">
     <div class="panel-head">
       <h2>1 &middot; input (stays here)</h2>
