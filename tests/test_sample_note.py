@@ -65,17 +65,29 @@ def main():
 
         # The same note as a PDF, which is the format that lies most easily: text outside the
         # page box is dropped by the extractor, so the fixture wraps like a real document.
+        import importlib.util
+        import shutil as _shutil
         from fixtures_make import make_pdf
         import ingest
+
         pdf_path = os.path.join(tmp, "helpdesk.pdf")
         make_pdf(pdf_path, NOTE)
-        extracted, fmt = ingest.extract(pdf_path)
-        chk("pdf/extracted", fmt == "pdf" and "printing resumed" in extracted, extracted[:60])
-        pdf_aliased, pdf_kinds = cens.censor_verified(extracted)
-        chk("pdf/all-six-caught",
-            all(pdf_kinds.get(k) == 1 for k in VALUES), f"{pdf_kinds}")
-        chk("pdf/no-value-survives", all(v not in pdf_aliased for v in VALUES.values()))
-        chk("pdf/round-trip", cens.restore(pdf_aliased) == extracted)
+        if _shutil.which("pdftotext") or importlib.util.find_spec("fitz"):
+            extracted, fmt = ingest.extract(pdf_path)
+            chk("pdf/extracted", fmt == "pdf" and "printing resumed" in extracted, extracted[:60])
+            pdf_aliased, pdf_kinds = cens.censor_verified(extracted)
+            chk("pdf/all-six-caught", all(pdf_kinds.get(k) == 1 for k in VALUES), f"{pdf_kinds}")
+            chk("pdf/no-value-survives", all(v not in pdf_aliased for v in VALUES.values()))
+            chk("pdf/round-trip", cens.restore(pdf_aliased) == extracted)
+        else:
+            # No extractor on this host: the control that matters is that the package says so
+            # and refuses, instead of handing back an empty page as if the file were clean.
+            try:
+                ingest.extract(pdf_path)
+                chk("pdf/refuses-without-extractor", False, "returned text without an extractor")
+            except ingest.IngestFailure as exc:
+                chk("pdf/refuses-without-extractor",
+                    "poppler" in str(exc) and "PyMuPDF" in str(exc), str(exc)[:80])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

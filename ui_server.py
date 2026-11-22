@@ -215,7 +215,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "service": "desensitizer-core-vagrant",
                                     "live": app.live_client is not None, "model": app.model_label,
                                     "kinds": kinds, "names": len(app.censors.names),
-                                    "version": "0.2.0"})
+                                    "version": "0.2.1"})
         if path == "/api/workspace":
             app = self.app
             if app.ws is None:

@@ -3,6 +3,20 @@
 All notable changes to this project. Format follows Keep a Changelog; versions use
 semantic versioning.
 
+## [0.2.1] — 2026-11-22
+
+### Fixed
+
+- The sample-note suite assumed a PDF extractor was installed. On a host without
+  `pdftotext` or PyMuPDF it now asserts the refusal message instead of crashing, so the
+  suite is 16 controls everywhere and strict CI cannot be defeated by a missing tool.
+- CI installs `poppler-utils`, so the real PDF path (not the refusal path) is what runs on
+  every matrix leg.
+
+### Changed
+
+- `app.py` / `ui_server.py` report version 0.2.1.
+
 ## [0.2.0] — 2026-11-22
 
 The bootstrap distribution: documents in, an agent confined to aliased copies, and a

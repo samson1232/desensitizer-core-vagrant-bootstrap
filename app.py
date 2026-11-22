@@ -49,7 +49,7 @@ import workspace as _workspace  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 UI_DIR = os.path.join(HERE, "ui")
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 LOCK = threading.Lock()
 
 
