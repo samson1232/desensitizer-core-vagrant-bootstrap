@@ -304,3 +304,15 @@ Routes: `/api/upload`, `/api/documents`, `/api/documents/<id>/restore`, `/api/do
 ## Licence
 
 MIT — see `LICENSE`.
+
+## Evals
+
+`evals/kev_per_word/` — can a 0.8B decision model (Kev, served as GGUF through llama.cpp)
+replace any of the detector's work? Measured per word against this repo's own labels:
+**no for the structured kinds, yes for one narrow question.** The write-up, including the two
+protocols that failed, is `docs/kev-per-word-eval.md`; the harness reproduces in three commands.
+
+Headline: the script censors the helpdesk note in **433 µs**; Kev at 42 ms/word on a P100 takes
+**3.74 s** for the same document and catches 1 of 9 values. Asked directly "is this a person's
+name?", though, it separates names from everything else at **AUC 0.958** — which is worth keeping
+as a candidate-only adjudicator, not as the decision layer.

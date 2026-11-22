@@ -1,0 +1,116 @@
+# Can Kev-0.8B decide, per word, what should be censored?
+
+Measured 2026-11-22 against `Kev-0.8B-Q8_0.gguf` (llama.cpp build 12473, `/v1/systemone`) on a
+Tesla P100. The label source is this repo's deterministic detector (`censor._collect` with the
+roster), computed locally; nothing was sent anywhere.
+
+**Answer: not per word, not for the structured kinds — but one specific question is good enough to
+be worth using as a narrow adjudicator. The censor pass stays scripted.**
+
+## The document
+
+The IT helpdesk note used throughout (`evals/kev_per_word/helpdesk_note.txt`): 89 words, six PII
+kinds — a name, an email, a Singapore phone number, a Windows hostname, an IPv4 and a MAC.
+
+## Protocol A — one request per word, word as the state
+
+`state = "<word>"`, `question = "Does this text identify a specific person or a specific device?"`
+
+```
+accuracy 0.888   precision 0.333   recall 0.111   tp=1 fp=2 fn=8 tn=78
+caught      priya.nair@example.com
+missed      Priya, Nair, +65, 8123, 9876, DESKTOP-9941A, 192.168.1.45, 00:1A:2B:3C:4D:5E
+needless    device, laptop
+```
+
+It is not noise — it is a semantic opinion about *what a string looks like*, and it disagrees with
+"should be censored" in a predictable direction:
+
+```
+Priya Nair 0.718    priya.nair@example.com 0.749    DESKTOP-9941A 0.329
++65 8123 9876 0.151   192.168.1.45 0.183   00:1A:2B:3C:4D:5E 0.162
+office printer 0.347  guest Wi-Fi 0.191   corporate network 0.140   technician 0.166
+```
+
+Names and emails score high; **structured identifiers score below ordinary prose**. A phone number
+looks less like a secret to this model than the word "printer".
+
+## Protocol B — the word inside the question text (rejected)
+
+`33 words × 89 questions, question = 'Should the word "X" at position N be replaced…'` → every
+answer came back `0.000`. The same request with a short fixed question returns sane values. Long,
+per-row question text breaks the pointer readout at this size; a naive implementation would ship
+this bug and read it as "the model says no to everything".
+
+## Protocol C — POS-confidence proxy (rejected)
+
+Hypothesis: ask "verb / noun / adjective / adverb / other" and treat low confidence as "this is a
+name, because names are semantically unique".
+
+```
+                 mean max-p   mean entropy   AUC(1-maxp → name)
+name class          0.516          1.328            0.433
+common words        0.505          1.241
+identifiers         0.498          1.289
+```
+
+AUC 0.433 — no separation, worse than chance. At a threshold low enough to catch every name,
+11 of 20 non-names are flagged (network, corporate, printing, resumed, normally, connect, summary,
+the MAC, the IP, the hostname, the staff id). Precision ~35%: censor a third of the document to
+catch two names.
+
+The one real observation: every name classified as **"other"**, never "noun" — but so do most rare
+and non-word tokens, so it is not discriminative on its own.
+
+## Protocol D — ask the question directly (kept)
+
+`state = "<word>"`, `question = "Is this word a person's name?"`
+
+```
+Priya 0.89   Nair 0.75   Alice 0.96   Smith 0.87   Kowalski 0.55   Nguyen 0.77
+non-names: guest 0.29, profile 0.23, credentials 0.20, MAC 0.18, everything else < 0.20
+AUC 0.958
+```
+
+The intuition behind Protocol C is right — names *are* distinct from common vocabulary — the
+signal just lives in the answer to the name question, not in the uncertainty of a POS question.
+The one false positive is `priya.nair@example.com` at 0.90, which a censor wants anyway.
+
+## Cost, same document, same machine
+
+| approach | cost per document | note |
+|---|---|---|
+| this repo's script | 433 µs | all structured kinds + roster names, deterministic |
+| Kev, per word on P100 | 3.74 s | 42 ms/word, 89 calls |
+| Kev, per word on CPU | 21.97 s | 247 ms/word, 8 threads |
+
+The script is ~8,600× faster and does not miss a structured kind. Any use of the model has to be
+narrow enough to justify that multiplier.
+
+## Architecture this supports
+
+1. Script decides everything deterministic: structured kinds plus roster names, fail-closed
+   (`censor_verified`, post-censor scan, byte-exact restore).
+2. Collect **candidates only**: capitalised tokens that are not sentence-initial and not in a
+   dictionary — about 8–10 per document here.
+3. One batched `/v1/systemone` request asking "Is this word a person's name?" for those tokens
+   (batching measured linear: 2→88 questions was 0.16 s→4.96 s). ≈0.3–0.5 s/doc on the P100.
+4. Merge the answered spans as `kind=name` into the same vault, so restore stays byte-exact and
+   the existing gates still apply.
+
+## What would change the conclusion
+
+- The sample is six names and twenty negatives, every state a bare word. Sentence-context states
+  and 50+ names are needed before trusting 0.958; `Kowalski` at 0.55 is already borderline.
+- A fine-tune is justified only if the adjudicator must be faster/smaller than this checkpoint, or
+  must cover organisations and addresses too. Training on labels generated by the script would be
+  circular: the ceiling is the script's recall minus the model's own error.
+
+## Reproduce
+
+```bash
+# GPU server (see p100-llama-cpp/docs/kev-0.8b-on-p100.md for the LD_LIBRARY_PATH trap)
+python3 evals/kev_per_word/probe.py --url http://127.0.0.1:8008 --mode score   # Protocol A
+python3 evals/kev_per_word/probe.py --url http://127.0.0.1:8008 --mode names   # Protocol D
+python3 evals/kev_per_word/probe.py --url http://127.0.0.1:8010 --mode time    # timing only
+```
